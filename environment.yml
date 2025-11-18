@@ -1,0 +1,15 @@
+name: muse_platformer
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - numpy
+  - scipy
+  - matplotlib
+  - pip
+  - pip:
+    - pygame
+    - pylsl
+    - muselsl
+    - heartpy
