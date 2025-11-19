@@ -13,3 +13,4 @@ dependencies:
     - pylsl
     - muselsl
     - heartpy
+    - seaborn
