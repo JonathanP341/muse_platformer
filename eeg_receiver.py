@@ -83,19 +83,26 @@ def process_signal(buffer, win_sec):
     of my choice. For this I will just do AF7 and AF8 because they are the most 
     reliable on a muse headset.
     """  
-    values = [0, 0, 0, 0]
+    values = [0, 0, 0, 0, 0]
     if len(buffer) == 512:
         values[0] = round(bandpower(buffer, 256, bands['delta'], 2), 2)
         values[1] = round(bandpower(buffer, 256, bands['theta'], 2), 2)
         values[2] = round(bandpower(buffer, 256, bands['alpha'], 2), 2)
         values[3] = round(bandpower(buffer, 256, bands['beta'], 2), 2)
+        values[4] = round(bandpower(buffer, 256, [0, 0], 2, total=True))
         del buffer[:22]
     return values
 
 
-def bandpower(data, sf, band, window_sec=None, relative=False):
+def bandpower(data, sf, band, window_sec=None, relative=False, total=False):
     """Compute the average power of the signal x in a specific frequency band
     
+    data -- The data we are getting the information from for the bandpower
+    sf  -- The amount of samples per second
+    band -- The ranges we want to analyze
+    window_sec -- Getting the range of the window we want to analyze
+    relative -- Set to true to get the perecentage of the total bandpower
+    total -- Set to true to get the total bandpower itself  
     """
     low, high = band
     if window_sec is not None:
@@ -103,12 +110,15 @@ def bandpower(data, sf, band, window_sec=None, relative=False):
     else:
         nperseg = (2 / low) * sf
 
-    #COmpute Welch
+    #Compute Welch
     freqs, psd = welch(data, sf, nperseg=nperseg)
 
     # Frequency resolution
     freq_res = freqs[1] - freqs[0]
 
+    if total: #Returning the total value, no index band
+        return simpson(psd, dx=freq_res)
+    
     #Find closest indecies of band in freq vector
     idx_band = np.logical_and(freqs >= low, freqs <= high)
 
@@ -118,3 +128,20 @@ def bandpower(data, sf, band, window_sec=None, relative=False):
     if relative:
         bp /= simpson(psd, dx=freq_res)
     return bp
+
+def compute_hrv():
+    """Getting the HRV from the PPG data"""
+
+
+#Potential methods I could introduce later
+def get_epoch(window_sec):
+    """This method would be if I change how the buffers are stored to get the last little bit of data"""
+
+def preprocess_buffers():
+    """This method would be to filter and flag the buffers"""
+
+def find_baseline():
+    """This would be to find the users baseline so we can compare"""
+
+def get_tilt_score():
+    """Using the baseline, we would get the tilt score with this method"""
