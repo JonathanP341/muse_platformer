@@ -14,3 +14,5 @@ dependencies:
     - muselsl
     - heartpy
     - seaborn
+    - oscpy
+    - pythonosc
