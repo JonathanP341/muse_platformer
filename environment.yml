@@ -15,4 +15,4 @@ dependencies:
     - heartpy
     - seaborn
     - oscpy
-    - pythonosc
+    - python-osc

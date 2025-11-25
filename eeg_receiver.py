@@ -128,7 +128,13 @@ class EEGReceiver:
         return bp
 
     def compute_hrv(self):
-        """Getting the HRV from the PPG1 data"""
+        """
+        Getting the HRV from the PPG1 data
+        
+        Returns:
+            dict, dict -- A working dictionary with all necessary data about the users heart rate
+            None -- If not enough data or if there is a heart py exeption
+        """
         if len(self.ppg_buffer) < 7 * 64:
             return None #Not enough data to get heart rate
 
@@ -136,10 +142,62 @@ class EEGReceiver:
 
         try:
             wd, m = hp.process(data, sample_rate=self.PPG_SAMPLE_RATE)
-            return m
+            return wd, m
         except hp.exceptions.HeartPyError:
+            print("Signal too messy for heart metrics")
             return None #Bad segment
 
+    def find_baevsky_index(self, wd):
+        """
+        Docstring for find_baevsky_index
+        
+        Args:
+            wd -- Working dictionary from heart py with the RR data necessary to find Baevsky stress
+        Returns:
+            float -- Baevsky index score
+        """
+        #Extracting and cleaning the data
+        rr_list = wd['RR_list']
+        rrs = np.array(rr_list)
+        rrs = rrs[rrs > 0]
+
+        #If not enough data
+        if len(rrs) < 10:
+            return 0.0 
+        
+        # Set up histogram bins
+        bin_width = 50
+        min_rr = np.min(rrs)
+        max_rr = np.max(rrs)
+
+        #Create bins from min to max with 50ms steps
+        bins = np.arange(min_rr, max_rr + bin_width, bin_width)
+
+        #If not enough bins
+        if len(bins) < 2:
+            return 0.0
+
+        #Calculate histogram
+        hist, bin_edges = np.histogram(rrs, bins=bins)
+
+        #Deriving components
+        max_bin_index = np.argmax(hist)
+        #Mode(Mo): Most frequent RR interval in seconds, dominant heart rhythm
+        Mo = (bin_edges[max_bin_index] + bin_edges[max_bin_index+1]) / 2 / 1000.0 #Convert to seconds
+
+        #Amplitude of Mode(AMo): Percent of total beats in the bin
+        AMo = (hist[max_bin_index] / len(rrs)) * 100.0
+
+        #Variational Range(MxDMn): Max RR - Min RR in seconds
+        MxDMn = (max_rr - min_rr) / 1000.0
+
+        if (MxDMn == 0 or Mo == 0):
+            return 0.0
+
+        #Calculate Stress Index(si)
+        si = AMo / (2 * Mo * MxDMn)
+
+        return si
 
 
 
