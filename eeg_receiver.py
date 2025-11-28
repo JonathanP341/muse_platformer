@@ -34,7 +34,8 @@ class EEGReceiver:
         #Baseline values
         #WIP - Not sure the exact metrics to look at
         #Will include HRV and some bandpower thing for sure
-        self.baseline_metrics = None
+        self.baseline_metrics = {}
+
 
         # Set up for the dispatcher 
         self.dispatcher = Dispatcher()
@@ -74,7 +75,7 @@ class EEGReceiver:
         if len(self.ppg_buffer) > self.PPG_WINDOW_SIZE:
             del self.ppg_buffer[:self.PPG_SAMPLE_RATE]
 
-    def process_signal(self, buffer, win_sec):
+    def process_signal(self, buffer):
         """
         Processing the signals to find the bandpower of each region averaged out
 
@@ -83,24 +84,28 @@ class EEGReceiver:
         reliable on a muse headset.
         """  
         values = [0, 0, 0, 0, 0]
-        if len(buffer) == 512:
+        if len(buffer) >= 512:
+            buffer = buffer[-512:]
             values[0] = round(self.bandpower(buffer, 256, self.bands['delta'], 2), 2)
             values[1] = round(self.bandpower(buffer, 256, self.bands['theta'], 2), 2)
             values[2] = round(self.bandpower(buffer, 256, self.bands['alpha'], 2), 2)
             values[3] = round(self.bandpower(buffer, 256, self.bands['beta'], 2), 2)
             values[4] = round(self.bandpower(buffer, 256, [0, 0], 2, total=True))
             del buffer[:44]
-        return values
+            return values
+        return None
 
     def bandpower(self, data, sf, band, window_sec=None, relative=False, total=False):
         """Compute the average power of the signal x in a specific frequency band
-        
-        data -- The data we are getting the information from for the bandpower
-        sf  -- The amount of samples per second
-        band -- The ranges we want to analyze
-        window_sec -- Getting the range of the window we want to analyze
-        relative -- Set to true to get the perecentage of the total bandpower
-        total -- Set to true to get the total bandpower itself  
+        Args:
+            data -- The data we are getting the information from for the bandpower
+            sf  -- The amount of samples per second
+            band -- The ranges we want to analyze
+            window_sec -- Getting the range of the window we want to analyze
+            relative -- Set to true to get the perecentage of the total bandpower
+            total -- Set to true to get the total bandpower itself  
+        Returns:
+            list -- Bandpower for the specified section
         """
         low, high = band
         if window_sec is not None:
@@ -160,7 +165,6 @@ class EEGReceiver:
         rr_list = wd['RR_list']
         rrs = np.array(rr_list)
         rrs = rrs[rrs > 0]
-
         #If not enough data
         if len(rrs) < 10:
             return 0.0 
@@ -172,11 +176,9 @@ class EEGReceiver:
 
         #Create bins from min to max with 50ms steps
         bins = np.arange(min_rr, max_rr + bin_width, bin_width)
-
         #If not enough bins
         if len(bins) < 2:
             return 0.0
-
         #Calculate histogram
         hist, bin_edges = np.histogram(rrs, bins=bins)
 
@@ -187,18 +189,73 @@ class EEGReceiver:
 
         #Amplitude of Mode(AMo): Percent of total beats in the bin
         AMo = (hist[max_bin_index] / len(rrs)) * 100.0
-
         #Variational Range(MxDMn): Max RR - Min RR in seconds
         MxDMn = (max_rr - min_rr) / 1000.0
-
         if (MxDMn == 0 or Mo == 0):
             return 0.0
-
         #Calculate Stress Index(si)
         si = AMo / (2 * Mo * MxDMn)
 
         return si
 
+    def find_biometric_values(self):
+        """
+        Finding the biometric values that we will use to check if the user is stressed or not
+        
+        Returns:
+            tuple -- Contains (alpha, beta, ratio, baevsky, hrv, ibi)
+
+        """
+        #Finding the biometric values, will use this for baseline AND to find the usual values
+        result = self.compute_hrv()
+
+        if result == None:
+            print("Not enough data...Try again soon.")
+            return None
+        wd, m = result
+
+        #Getting all of the bandpowers for each value
+        tp9Values = self.bandpower(self.TP9Buffer)
+        tp10Values = self.bandpower(self.TP10Buffer)
+        af7Values = self.bandpower(self.AF7Buffer)
+        af8Values = self.bandpower(self.AF8Buffer)
+        auxValues = self.bandpower(self.AUXBuffer)
+
+        if tp9Values == None or tp10Values == None or af7Values == None or af8Values == None or auxValues == None:
+            return None
+
+        #Combining the values to get an average
+        values = [0, 0, 0, 0, 0]
+        for i in range(len(tp9Values)):
+            values[i] = (tp9Values[i] + tp10Values[i] + af7Values[i] + af8Values[i] + auxValues[i]) / 5
+        
+        #{"delta": [0.5, 4], "theta": [4, 8], "alpha": [8, 12], "beta": [12, 30], "gamma": [30, 50]}
+        alpha = values[2]
+        beta = values[3]
+        ratio = beta / alpha
+
+        baevsky = self.find_baevsky_index(wd)
+
+        hrv = m['bpm']
+        ibi = m['ibi']
+
+        return {"alpha_waves": alpha, 
+                "beta_waves": beta, 
+                "alpha_beta_ratio": ratio, 
+                "baevsky": baevsky, 
+                "hrv": hrv, 
+                "ibi": ibi}
+
+    def find_baseline(self):
+        """
+        Finding our baseline values using biometrics
+        """
+        #Should have some code to cancel out the previous data and to tell the user to stop and relax
+        self.baseline_metrics = self.find_biometric_values() 
+        #Averaging out the bandpower values to get the value
+
+
+        
 
 
 #Potential methods I could introduce later
