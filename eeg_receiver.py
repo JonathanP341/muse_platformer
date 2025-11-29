@@ -3,12 +3,14 @@ from pythonosc.osc_server import BlockingOSCUDPServer
 
 from scipy.signal import welch
 from scipy.integrate import simpson
+from collections import deque
 
 import numpy as np
 import heartpy as hp
 
 import multiprocessing
 import threading
+import time
 
 class EEGReceiver:
     def __init__(self, ip="127.0.0.1", port=5000):
@@ -17,17 +19,16 @@ class EEGReceiver:
         self.port = port
         self.bands = {"delta": [0.5, 4], "theta": [4, 8], "alpha": [8, 12], "beta": [12, 30], "gamma": [30, 50]}
         self.PPG_SAMPLE_RATE = 64
-        self.PPG_WINDOW_SIZE = 8 * self.PPG_SAMPLE_RATE
+        self.PPG_WINDOW_SIZE = 30 * self.PPG_SAMPLE_RATE
         self.EEG_SAMPLE_RATE = 256
-        self.EEG_WINDOW_SIZE = 3 * self.EEG_SAMPLE_RATE
+        self.EEG_WINDOW_SIZE = 2 * self.EEG_SAMPLE_RATE
 
         #Synchronous values
-        self.TP9Buffer = [] #LT
-        self.AF7Buffer = [] #LF
-        self.AF8Buffer = [] #RF
-        self.TP10Buffer = [] #RT
-        self.AUXBuffer = [] #X
-        self.ppg_buffer = []
+        self.TP9Buffer = deque(maxlen=self.EEG_WINDOW_SIZE) #LT
+        self.AF7Buffer = deque(maxlen=self.EEG_WINDOW_SIZE) #LF
+        self.AF8Buffer = deque(maxlen=self.EEG_WINDOW_SIZE) #RF
+        self.TP10Buffer = deque(maxlen=self.EEG_WINDOW_SIZE) #RT
+        self.ppg_buffer = deque(maxlen=self.PPG_WINDOW_SIZE) 
 
         self.latest_bandpower = []
 
@@ -54,46 +55,44 @@ class EEGReceiver:
         Processing the EEG data by putting it in the respective buffers
 
         address -- The address the values are being sent to 
-        values -- Contains an array with 5 values [TP9, AF7, AF8, TP10, AUX]
+        values -- Contains an array with 5 values [TP9, AF7, AF8, TP10, AUX], we ignore AUX
         """
         self.TP9Buffer.append(values[0])
         self.AF7Buffer.append(values[1])
         self.AF8Buffer.append(values[2])
         self.TP10Buffer.append(values[3])
-        self.AUXBuffer.append(values[4])
-
-        if len(self.TP9Buffer) > self.EEG_WINDOW_SIZE:
-            del self.TP9Buffer[:self.EEG_SAMPLE_RATE]
-            del self.TP10Buffer[:self.EEG_SAMPLE_RATE]
-            del self.AF7Buffer[:self.EEG_SAMPLE_RATE]
-            del self.AF8Buffer[:self.EEG_SAMPLE_RATE]
-            del self.AUXBuffer[:self.EEG_SAMPLE_RATE]
     
     def on_ppg(self, address, *values):
+        """
+        Processing the PPG data by appending it to its respective buffers, only considering
+        PPG1 data as its the most reliable
+        Args:
+            address -- The address the values are being sent to 
+            values -- Contains an array with 3 values [PPG1, PPG2, PPG3], we ignore PPG2/3
+        """
         self.ppg_buffer.append(values[0]) #Only storing PPG1
-
-        if len(self.ppg_buffer) > self.PPG_WINDOW_SIZE:
-            del self.ppg_buffer[:self.PPG_SAMPLE_RATE]
 
     def process_signal(self, buffer):
         """
         Processing the signals to find the bandpower of each region averaged out
 
-        This means we will find delta, theta, alpha, and beta(no gamma) for the channels 
-        of my choice. For this I will just do AF7 and AF8 because they are the most 
-        reliable on a muse headset.
+        This means we will find delta, theta, alpha, and beta and total for the channels 
+        of my choice.
         """  
+        data = list(buffer)
+        if len(data) < 512:
+            return None
+
+        #Storing the values and getting the most recent data
         values = [0, 0, 0, 0, 0]
-        if len(buffer) >= 512:
-            buffer = buffer[-512:]
-            values[0] = round(self.bandpower(buffer, 256, self.bands['delta'], 2), 2)
-            values[1] = round(self.bandpower(buffer, 256, self.bands['theta'], 2), 2)
-            values[2] = round(self.bandpower(buffer, 256, self.bands['alpha'], 2), 2)
-            values[3] = round(self.bandpower(buffer, 256, self.bands['beta'], 2), 2)
-            values[4] = round(self.bandpower(buffer, 256, [0, 0], 2, total=True))
-            del buffer[:44]
-            return values
-        return None
+        recent_data = data[-512:]
+
+        values[0] = round(self.bandpower(recent_data, 256, self.bands['delta'], 2), 2)
+        values[1] = round(self.bandpower(recent_data, 256, self.bands['theta'], 2), 2)
+        values[2] = round(self.bandpower(recent_data, 256, self.bands['alpha'], 2), 2)
+        values[3] = round(self.bandpower(recent_data, 256, self.bands['beta'], 2), 2)
+        values[4] = round(self.bandpower(recent_data, 256, [0, 0], 2, total=True))
+        return values
 
     def bandpower(self, data, sf, band, window_sec=None, relative=False, total=False):
         """Compute the average power of the signal x in a specific frequency band
@@ -140,10 +139,9 @@ class EEGReceiver:
             dict, dict -- A working dictionary with all necessary data about the users heart rate
             None -- If not enough data or if there is a heart py exeption
         """
-        if len(self.ppg_buffer) < 7 * 64:
+        data = list(self.ppg_buffer)
+        if len(data) < 20 * self.PPG_SAMPLE_RATE:
             return None #Not enough data to get heart rate
-
-        data = self.ppg_buffer[-self.PPG_SAMPLE_RATE*7:]
 
         try:
             wd, m = hp.process(data, sample_rate=self.PPG_SAMPLE_RATE)
@@ -219,44 +217,80 @@ class EEGReceiver:
         tp10Values = self.bandpower(self.TP10Buffer)
         af7Values = self.bandpower(self.AF7Buffer)
         af8Values = self.bandpower(self.AF8Buffer)
-        auxValues = self.bandpower(self.AUXBuffer)
 
-        if tp9Values == None or tp10Values == None or af7Values == None or af8Values == None or auxValues == None:
+        if tp9Values == None or tp10Values == None or af7Values == None or af8Values == None:
             return None
 
         #Combining the values to get an average
-        values = [0, 0, 0, 0, 0]
+        #{"delta": [0.5, 4], "theta": [4, 8], "alpha": [8, 12], "beta": [12, 30], "total"}
+        values = [0, 0, 0, 0, 0] #Delta, Theta, alpha, beta, total 
         for i in range(len(tp9Values)):
-            values[i] = (tp9Values[i] + tp10Values[i] + af7Values[i] + af8Values[i] + auxValues[i]) / 5
+            values[i] = (tp9Values[i] + tp10Values[i] + af7Values[i] + af8Values[i]) / 4
         
-        #{"delta": [0.5, 4], "theta": [4, 8], "alpha": [8, 12], "beta": [12, 30], "gamma": [30, 50]}
-        alpha = values[2]
-        beta = values[3]
+        #Converting the alpha and beta ratios to be relative
+        alpha = values[2] / values[4]
+        beta = values[3] / values[4]
         ratio = beta / alpha
 
         baevsky = self.find_baevsky_index(wd)
 
-        hrv = m['bpm']
+        bpm = m['bpm']
         ibi = m['ibi']
+        hrv = m['rmssd']
 
         return {"alpha_waves": alpha, 
                 "beta_waves": beta, 
                 "alpha_beta_ratio": ratio, 
                 "baevsky": baevsky, 
-                "hrv": hrv, 
+                "bpm": bpm, 
+                "hrv": hrv,
                 "ibi": ibi}
 
     def find_baseline(self):
         """
         Finding our baseline values using biometrics
         """
-        #Should have some code to cancel out the previous data and to tell the user to stop and relax
+        #Resetting all values
+        self.AF7Buffer = []
+        self.AF8Buffer = []
+        self.TP9Buffer = []
+        self.TP10Buffer = []
+        self.AUXBuffer = []
+        self.ppg_buffer = []
+        self.latest_bandpower = []
+        self.PPG_WINDOW_SIZE = 30 * self.PPG_SAMPLE_RATE
+
+        calibration_duration = 30 #We will wait 30 seconds to get a proper baseline
+
+        for i in range(calibration_duration):
+            time.sleep(1)
+            if i % 2 == 0:
+                print(f"Calibrating... {calibration_duration-i} seconds left.")
+
         self.baseline_metrics = self.find_biometric_values() 
-        #Averaging out the bandpower values to get the value
-
-
         
+        if self.baseline_metrics == None:
+            print("Something went wrong in baseline metrics, please try again.")
+            return None
 
+        print("Baseline established.")
+        return self.baseline_metrics
+
+
+if __name__ == '__main__':
+    print("Starting EEG Receiver Class")
+    #Setting up the class
+    eeg = EEGReceiver()
+    eeg.start()
+    time.sleep(1)
+    print(eeg.AF7Buffer)
+    if eeg.AF7Buffer != None:
+        values = eeg.find_baseline()
+
+        print(values)
+
+    print("Done")
+        
 
 #Potential methods I could introduce later
 def get_epoch(window_sec):
@@ -264,9 +298,6 @@ def get_epoch(window_sec):
 
 def preprocess_buffers():
     """This method would be to filter and flag the buffers"""
-
-def find_baseline():
-    """This would be to find the users baseline so we can compare"""
 
 def get_tilt_score():
     """Using the baseline, we would get the tilt score with this method"""
