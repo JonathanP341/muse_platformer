@@ -1,3 +1,6 @@
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning, module='pkg_resources')
+
 from pythonosc.dispatcher import Dispatcher
 from pythonosc.osc_server import BlockingOSCUDPServer
 
@@ -13,7 +16,7 @@ import threading
 import time
 
 class EEGReceiver:
-    def __init__(self, ip="127.0.0.1", port=5000):
+    def __init__(self, ip="0.0.0.0", port=5000):
         #Set up values
         self.ip = ip
         self.port = port
@@ -21,7 +24,7 @@ class EEGReceiver:
         self.PPG_SAMPLE_RATE = 64
         self.PPG_WINDOW_SIZE = 30 * self.PPG_SAMPLE_RATE
         self.EEG_SAMPLE_RATE = 256
-        self.EEG_WINDOW_SIZE = 2 * self.EEG_SAMPLE_RATE
+        self.EEG_WINDOW_SIZE = 3 * self.EEG_SAMPLE_RATE
 
         #Synchronous values
         self.TP9Buffer = deque(maxlen=self.EEG_WINDOW_SIZE) #LT
@@ -57,10 +60,17 @@ class EEGReceiver:
         address -- The address the values are being sent to 
         values -- Contains an array with 5 values [TP9, AF7, AF8, TP10, AUX], we ignore AUX
         """
-        self.TP9Buffer.append(values[0])
-        self.AF7Buffer.append(values[1])
-        self.AF8Buffer.append(values[2])
-        self.TP10Buffer.append(values[3])
+        raw_values = np.array(values[:4]) #Ignoring AUX
+        eeg_data = np.array(raw_values, dtype=float) 
+
+        #Scrubbing out bad values
+        if np.isnan(eeg_data).any() or (eeg_data == 0.0).any():
+            return 
+        
+        self.TP9Buffer.append(eeg_data[0])
+        self.AF7Buffer.append(eeg_data[1])
+        self.AF8Buffer.append(eeg_data[2])
+        self.TP10Buffer.append(eeg_data[3])
     
     def on_ppg(self, address, *values):
         """
@@ -70,7 +80,13 @@ class EEGReceiver:
             address -- The address the values are being sent to 
             values -- Contains an array with 3 values [PPG1, PPG2, PPG3], we ignore PPG2/3
         """
-        self.ppg_buffer.append(values[0]) #Only storing PPG1
+        try:
+            val = float(values[0])
+            if not np.isnan(val) or val != 0.0:
+                self.ppg_buffer.append(val) #Only storing PPG1
+        except (ValueError, TypeError):
+            pass #Ignore bad values
+        
 
     def process_signal(self, buffer):
         """
@@ -146,7 +162,7 @@ class EEGReceiver:
         try:
             wd, m = hp.process(data, sample_rate=self.PPG_SAMPLE_RATE)
             return wd, m
-        except hp.exceptions.HeartPyError:
+        except:
             print("Signal too messy for heart metrics")
             return None #Bad segment
 
@@ -203,7 +219,7 @@ class EEGReceiver:
         Returns:
             tuple -- Contains (alpha, beta, ratio, baevsky, hrv, ibi)
 
-        """
+        
         #Finding the biometric values, will use this for baseline AND to find the usual values
         result = self.compute_hrv()
 
@@ -211,12 +227,12 @@ class EEGReceiver:
             print("Not enough data...Try again soon.")
             return None
         wd, m = result
-
+        """
         #Getting all of the bandpowers for each value
-        tp9Values = self.bandpower(self.TP9Buffer)
-        tp10Values = self.bandpower(self.TP10Buffer)
-        af7Values = self.bandpower(self.AF7Buffer)
-        af8Values = self.bandpower(self.AF8Buffer)
+        tp9Values = self.process_signal(self.TP9Buffer)
+        tp10Values = self.process_signal(self.TP10Buffer)
+        af7Values = self.process_signal(self.AF7Buffer)
+        af8Values = self.process_signal(self.AF8Buffer)
 
         if tp9Values == None or tp10Values == None or af7Values == None or af8Values == None:
             return None
@@ -228,15 +244,15 @@ class EEGReceiver:
             values[i] = (tp9Values[i] + tp10Values[i] + af7Values[i] + af8Values[i]) / 4
         
         #Converting the alpha and beta ratios to be relative
-        alpha = values[2] / values[4]
-        beta = values[3] / values[4]
-        ratio = beta / alpha
+        alpha = round(values[2] / values[4], 3)
+        beta = round(values[3] / values[4], 3)
+        ratio = round(beta / alpha, 3)
 
-        baevsky = self.find_baevsky_index(wd)
+        baevsky = 50#self.find_baevsky_index(wd)
 
-        bpm = m['bpm']
-        ibi = m['ibi']
-        hrv = m['rmssd']
+        bpm = 60#m['bpm']
+        ibi = 60#m['ibi']
+        hrv = 60#m['rmssd']
 
         return {"alpha_waves": alpha, 
                 "beta_waves": beta, 
@@ -276,6 +292,10 @@ class EEGReceiver:
         print("Baseline established.")
         return self.baseline_metrics
 
+    def preprocess_buffers(self):
+        """This method would be to filter and flag the buffers"""
+        return
+
 
 if __name__ == '__main__':
     print("Starting EEG Receiver Class")
@@ -283,10 +303,10 @@ if __name__ == '__main__':
     eeg = EEGReceiver()
     eeg.start()
     time.sleep(1)
-    print(eeg.AF7Buffer)
-    if eeg.AF7Buffer != None:
+    print(eeg.ppg_buffer)
+    if len(eeg.AF7Buffer) > 1:
         values = eeg.find_baseline()
-
+        print(len(eeg.ppg_buffer))
         print(values)
 
     print("Done")
@@ -295,9 +315,6 @@ if __name__ == '__main__':
 #Potential methods I could introduce later
 def get_epoch(window_sec):
     """This method would be if I change how the buffers are stored to get the last little bit of data"""
-
-def preprocess_buffers():
-    """This method would be to filter and flag the buffers"""
 
 def get_tilt_score():
     """Using the baseline, we would get the tilt score with this method"""
