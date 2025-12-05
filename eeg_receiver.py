@@ -160,7 +160,10 @@ class EEGReceiver:
             return None #Not enough data to get heart rate
 
         try:
-            wd, m = hp.process(data, sample_rate=self.PPG_SAMPLE_RATE)
+            filtered_data = hp.filter_signal(data, cutoff=[0.7, 3.5], sample_rate=self.PPG_SAMPLE_RATE, order=3, filtertype='bandpass')
+
+            #Processing the filtered data
+            wd, m = hp.process(filtered_data, sample_rate=self.PPG_SAMPLE_RATE)
             return wd, m
         except:
             print("Signal too messy for heart metrics")
@@ -218,7 +221,7 @@ class EEGReceiver:
         
         Returns:
             tuple -- Contains (alpha, beta, ratio, baevsky, hrv, ibi)
-
+        """
         
         #Finding the biometric values, will use this for baseline AND to find the usual values
         result = self.compute_hrv()
@@ -227,7 +230,7 @@ class EEGReceiver:
             print("Not enough data...Try again soon.")
             return None
         wd, m = result
-        """
+        
         #Getting all of the bandpowers for each value
         tp9Values = self.process_signal(self.TP9Buffer)
         tp10Values = self.process_signal(self.TP10Buffer)
@@ -244,15 +247,15 @@ class EEGReceiver:
             values[i] = (tp9Values[i] + tp10Values[i] + af7Values[i] + af8Values[i]) / 4
         
         #Converting the alpha and beta ratios to be relative
-        alpha = round(values[2] / values[4], 3)
-        beta = round(values[3] / values[4], 3)
+        alpha = round(values[2], 3)
+        beta = round(values[3], 3)
         ratio = round(beta / alpha, 3)
 
-        baevsky = 50#self.find_baevsky_index(wd)
+        baevsky = self.find_baevsky_index(wd)
 
-        bpm = 60#m['bpm']
-        ibi = 60#m['ibi']
-        hrv = 60#m['rmssd']
+        bpm = m['bpm']
+        ibi = m['ibi']
+        hrv = m['rmssd']
 
         return {"alpha_waves": alpha, 
                 "beta_waves": beta, 
@@ -292,8 +295,10 @@ class EEGReceiver:
         print("Baseline established.")
         return self.baseline_metrics
 
-    def preprocess_buffers(self):
+    def preprocess_ppg_buffer(self):
         """This method would be to filter and flag the buffers"""
+
+
         return
 
 
@@ -306,8 +311,10 @@ if __name__ == '__main__':
     print(eeg.ppg_buffer)
     if len(eeg.AF7Buffer) > 1:
         values = eeg.find_baseline()
-        print(len(eeg.ppg_buffer))
-        print(values)
+        print(f"------Baseline Metrics-------")
+        print(f"Alpha Waves: {values['alpha_waves']}")
+        print(f"Beta Waves: {values['beta_waves']}")
+        print(f"Alpha/Beta Ratio: {values['alpha_beta_ratio']}")
 
     print("Done")
         
