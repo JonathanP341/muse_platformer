@@ -4,7 +4,7 @@ warnings.filterwarnings("ignore", category=UserWarning, module='pkg_resources')
 from pythonosc.dispatcher import Dispatcher
 from pythonosc.osc_server import BlockingOSCUDPServer
 
-from scipy.signal import welch
+from scipy.signal import welch, periodogram
 from scipy.integrate import simpson
 from collections import deque
 
@@ -98,17 +98,24 @@ class EEGReceiver:
         data = list(buffer)
         if len(data) < 512:
             return None
+        recent_data = np.array(data[-512:])
+        
+        delta = round(self.bandpower(recent_data, 256, self.bands['delta'], 2), 2)
 
-        #Storing the values and getting the most recent data
-        values = [0, 0, 0, 0, 0]
-        recent_data = data[-512:]
+        if delta > 1000: #Arbitrary threshold to remove bad data
+            return None
+        
+        theta = round(self.bandpower(recent_data, 256, self.bands['theta'], 2), 2)
+        alpha = round(self.bandpower(recent_data, 256, self.bands['alpha'], 2), 2)
+        beta = round(self.bandpower(recent_data, 256, self.bands['beta'], 2), 2)
+        total = theta + alpha + beta
+        
+        if alpha < 1.0:
+            ratio = 0.0
+        else:
+            ratio = beta / alpha
 
-        values[0] = round(self.bandpower(recent_data, 256, self.bands['delta'], 2), 2)
-        values[1] = round(self.bandpower(recent_data, 256, self.bands['theta'], 2), 2)
-        values[2] = round(self.bandpower(recent_data, 256, self.bands['alpha'], 2), 2)
-        values[3] = round(self.bandpower(recent_data, 256, self.bands['beta'], 2), 2)
-        values[4] = round(self.bandpower(recent_data, 256, [0, 0], 2, total=True))
-        return values
+        return {"alpha": alpha, "beta": beta, "theta": theta, "ratio": ratio, "total": total}
 
     def bandpower(self, data, sf, band, window_sec=None, relative=False, total=False):
         """Compute the average power of the signal x in a specific frequency band
@@ -123,19 +130,17 @@ class EEGReceiver:
             list -- Bandpower for the specified section
         """
         low, high = band
-        if window_sec is not None:
-            nperseg = window_sec * sf
-        else:
-            nperseg = (2 / low) * sf
 
-        #Compute Welch
-        freqs, psd = welch(data, sf, nperseg=nperseg)
+        #Compute periodogram
+        freqs, psd = periodogram(data, sf)
 
         # Frequency resolution
         freq_res = freqs[1] - freqs[0]
 
+        total_power = simpson(psd, dx=freq_res)
+
         if total: #Returning the total value, no index band
-            return simpson(psd, dx=freq_res)
+            return total_power
         
         #Find closest indecies of band in freq vector
         idx_band = np.logical_and(freqs >= low, freqs <= high)
@@ -144,6 +149,8 @@ class EEGReceiver:
         bp = simpson(psd[idx_band], dx=freq_res)
 
         if relative:
+            if total_power == 0:
+                return 0.0
             bp /= simpson(psd, dx=freq_res)
         return bp
 
@@ -160,7 +167,8 @@ class EEGReceiver:
             return None #Not enough data to get heart rate
 
         try:
-            filtered_data = hp.filter_signal(data, cutoff=[0.7, 3.5], sample_rate=self.PPG_SAMPLE_RATE, order=3, filtertype='bandpass')
+            #Restricting range to BPM of 45-150
+            filtered_data = hp.filter_signal(data, cutoff=[0.75, 2.5], sample_rate=self.PPG_SAMPLE_RATE, order=4, filtertype='bandpass')
 
             #Processing the filtered data
             wd, m = hp.process(filtered_data, sample_rate=self.PPG_SAMPLE_RATE)
@@ -241,29 +249,30 @@ class EEGReceiver:
             return None
 
         #Combining the values to get an average
-        #{"delta": [0.5, 4], "theta": [4, 8], "alpha": [8, 12], "beta": [12, 30], "total"}
-        values = [0, 0, 0, 0, 0] #Delta, Theta, alpha, beta, total 
-        for i in range(len(tp9Values)):
-            values[i] = (tp9Values[i] + tp10Values[i] + af7Values[i] + af8Values[i]) / 4
-        
-        #Converting the alpha and beta ratios to be relative
-        alpha = round(values[2], 3)
-        beta = round(values[3], 3)
-        ratio = round(beta / alpha, 3)
+        #{"delta": [0.5, 4], "theta": [4, 8], "alpha": [8, 12], "beta": [12, 30], "total"} 
+        alpha = (tp9Values['alpha'] + tp10Values['alpha'] + af7Values['alpha'] + af8Values['alpha']) / 4.0
+        beta = (tp9Values['beta'] + tp10Values['beta'] + af7Values['beta'] + af8Values['beta']) / 4.0
+        ratio = (tp9Values['ratio'] + tp10Values['ratio'] + af7Values['ratio'] + af8Values['ratio']) / 4.0
+        total = (tp9Values['total'] + tp10Values['total'] + af7Values['total'] + af8Values['total']) / 4.0
 
         baevsky = self.find_baevsky_index(wd)
 
         bpm = m['bpm']
         ibi = m['ibi']
-        hrv = m['rmssd']
+        rmssd = m['rmssd']
 
-        return {"alpha_waves": alpha, 
+        baseline = {"alpha_waves": alpha, 
+                "alpha_waves_relative": alpha / total if total > 0 else -1.0,
                 "beta_waves": beta, 
+                "beta_waves_relative": beta / total if total > 0 else -1.0,
                 "alpha_beta_ratio": ratio, 
                 "baevsky": baevsky, 
                 "bpm": bpm, 
-                "hrv": hrv,
+                "rmssd": rmssd,
                 "ibi": ibi}
+        for key in baseline.keys():
+            baseline[key] = round(baseline[key], 5)
+        return baseline
 
     def find_baseline(self):
         """
@@ -295,10 +304,59 @@ class EEGReceiver:
         print("Baseline established.")
         return self.baseline_metrics
 
+    def get_tilt_score(self):
+        """
+        Using the baseline, we would get the tilt score with this method.
+
+        We are primarily comparing the alpha/beta ratio, baevsky index and HRV values to see if the user is stressed.
+
+        0.0 is zen, monk in the himalayas and 1.0 is full tilt literally punching your monitor
+
+        In the future I could use machine learning to determine this score better, for now thresholds will work. We will be comparing
+        stress in tiers, 25-50%, 50-75%, 75-100% 
+        """
+        user_biometrics = self.find_biometric_values()
+        
+        if user_biometrics == None or self.baseline_metrics == {}:
+            print("Not enough data or base line is none, cannot compute tilt score.")
+        
+        #Checking their alpha/beta ratio against baseline
+        if self.baseline_metrics['alpha_beta_ratio'] == 0:
+            ratio_change = 0.0
+        else:
+            ratio_change = (user_biometrics['alpha_beta_ratio'] - self.baseline_metrics['alpha_beta_ratio']) / self.baseline_metrics['alpha_beta_ratio']
+        ratio_change = max(0.0, min(ratio_change, 1.0)) #Clamping between 0 and 1, might not be the best way
+
+        #Checking baevsky index
+        if self.baseline_metrics['baevsky'] == 0:
+            baevsky_change = 0.0
+        else:
+            baevsky_change = (user_biometrics['baevsky'] - self.baseline_metrics['baevsky']) / self.baseline_metrics['baevsky']
+        baevsky_change = max(0.0, min(baevsky_change, 1.0)) #Clamping between 0 and 1, might not be the best way
+
+        #Checking BPM
+        if self.baseline_metrics['bpm'] == 0:
+            bpm_change = 0.0
+        else:
+            bpm_change = (user_biometrics['bpm'] - self.baseline_metrics['bpm']) / self.baseline_metrics['bpm']
+        bpm_change = max(0.0, min(bpm_change, 1.0)) #Clamping between 0 and 1, might not be the best way
+
+        #Checking HRV with RMSSD, higher is better so inverse
+        if self.baseline_metrics['rmssd'] == 0:
+            hrv_change = 0.0
+        else:
+            hrv_change = (self.baseline_metrics['bpm'] - user_biometrics['bpm']) / self.baseline_metrics['bpm']
+        hrv_change = max(0.0, min(hrv_change, 1.0))  
+        #Potentially look into SNS, PNS and other metrics later
+
+        #Combining the values to get a tilt score
+        tilt_score = (ratio_change + baevsky_change + bpm_change + hrv_change) / 4.0
+        tilt_score = max(0.0, min(tilt_score, 1.0)) #Clamping between 0 and 1
+
+        return tilt_score
+
     def preprocess_ppg_buffer(self):
         """This method would be to filter and flag the buffers"""
-
-
         return
 
 
@@ -311,17 +369,22 @@ if __name__ == '__main__':
     print(eeg.ppg_buffer)
     if len(eeg.AF7Buffer) > 1:
         values = eeg.find_baseline()
-        print(f"------Baseline Metrics-------")
-        print(f"Alpha Waves: {values['alpha_waves']}")
-        print(f"Beta Waves: {values['beta_waves']}")
-        print(f"Alpha/Beta Ratio: {values['alpha_beta_ratio']}")
+        print(values)
+    tilt = eeg.get_tilt_score()
+    print(f"Tilt Score: {tilt}")
+    time.sleep(10) #Waiting another 10 seconds to update data
+    tilt = eeg.get_tilt_score()
+    print(f"Tilt Score: {tilt}")
+    for i in range(5):
+        print("sleeping 5 seconds...")
+        time.sleep(5)
+        tilt = eeg.get_tilt_score()
+        print(f"Tilt Score: {tilt}")
+    print("Done.")
 
-    print("Done")
         
 
 #Potential methods I could introduce later
 def get_epoch(window_sec):
     """This method would be if I change how the buffers are stored to get the last little bit of data"""
-
-def get_tilt_score():
-    """Using the baseline, we would get the tilt score with this method"""
+    return
