@@ -27,19 +27,16 @@ class EEGReceiver:
         self.EEG_WINDOW_SIZE = 3 * self.EEG_SAMPLE_RATE
 
         #Synchronous values
-        self.TP9Buffer = deque(maxlen=self.EEG_WINDOW_SIZE) #LT
         self.AF7Buffer = deque(maxlen=self.EEG_WINDOW_SIZE) #LF
         self.AF8Buffer = deque(maxlen=self.EEG_WINDOW_SIZE) #RF
-        self.TP10Buffer = deque(maxlen=self.EEG_WINDOW_SIZE) #RT
         self.ppg_buffer = deque(maxlen=self.PPG_WINDOW_SIZE) 
 
         self.latest_bandpower = {}
+        self.previous_tilt_score = 0.0
 
         #Baseline values
-        #WIP - Not sure the exact metrics to look at
-        #Will include HRV and some bandpower thing for sure
-        self.baseline_metrics = {}
-
+        self.baseline_metrics = {"nasa": 0.0, "faa": 0.0}
+        self.baseline_tilt_score = 1 #Set to 1 to avoid divsion by 0 issues
 
         # Set up for the dispatcher 
         self.dispatcher = Dispatcher()
@@ -58,19 +55,17 @@ class EEGReceiver:
         Processing the EEG data by putting it in the respective buffers
 
         address -- The address the values are being sent to 
-        values -- Contains an array with 5 values [TP9, AF7, AF8, TP10, AUX], we ignore AUX
+        values -- Contains an array with 5 values [TP9, AF7, AF8, TP10, AUX], we ignore AUX, TP9 and TP10
         """
-        raw_values = np.array(values[:4]) #Ignoring AUX
+        raw_values = np.array(values[1:3]) #Ignoring TP9, TP10 and AUX
         eeg_data = np.array(raw_values, dtype=float) 
 
         #Scrubbing out bad values
         if np.isnan(eeg_data).any() or (eeg_data == 0.0).any():
             return 
         
-        self.TP9Buffer.append(eeg_data[0])
-        self.AF7Buffer.append(eeg_data[1])
-        self.AF8Buffer.append(eeg_data[2])
-        self.TP10Buffer.append(eeg_data[3])
+        self.AF7Buffer.append(eeg_data[0])
+        self.AF8Buffer.append(eeg_data[1])
     
     def on_ppg(self, address, *values):
         """
@@ -112,13 +107,8 @@ class EEGReceiver:
         alpha = round(self.bandpower(recent_data, 256, self.bands['alpha'], 2), 2)
         beta = round(self.bandpower(recent_data, 256, self.bands['beta'], 2), 2)
         total = theta + alpha + beta
-        
-        if alpha < 1.0:
-            ratio = 0.0
-        else:
-            ratio = beta / alpha
 
-        return {"alpha": alpha, "beta": beta, "theta": theta, "ratio": ratio, "total": total}
+        return {"alpha": alpha, "beta": beta, "theta": theta, "total": total}
 
     def bandpower(self, data, sf, band, window_sec=None, relative=False, total=False):
         """Compute the average power of the signal x in a specific frequency band
@@ -157,130 +147,6 @@ class EEGReceiver:
             bp /= simpson(psd, dx=freq_res)
         return bp
 
-    def compute_hrv(self):
-        """
-        Getting the HRV from the PPG1 data
-        
-        Returns:
-            dict, dict -- A working dictionary with all necessary data about the users heart rate
-            None -- If not enough data or if there is a heart py exeption
-        """
-        data = list(self.ppg_buffer)
-        if len(data) < 20 * self.PPG_SAMPLE_RATE:
-            return None #Not enough data to get heart rate
-
-        try:
-            #Restricting range to BPM of 45-150
-            filtered_data = hp.filter_signal(data, cutoff=[0.75, 2.5], sample_rate=self.PPG_SAMPLE_RATE, order=4, filtertype='bandpass')
-
-            #Processing the filtered data
-            wd, m = hp.process(filtered_data, sample_rate=self.PPG_SAMPLE_RATE)
-            return wd, m
-        except:
-            print("Signal too messy for heart metrics")
-            return None #Bad segment
-
-    def find_baevsky_index(self, wd):
-        """
-        Docstring for find_baevsky_index
-        
-        Args:
-            wd -- Working dictionary from heart py with the RR data necessary to find Baevsky stress
-        Returns:
-            float -- Baevsky index score
-        """
-        #Extracting and cleaning the data
-        rr_list = wd['RR_list']
-        rrs = np.array(rr_list)
-        rrs = rrs[rrs > 0]
-        #If not enough data
-        if len(rrs) < 10:
-            return 0.0 
-        
-        # Set up histogram bins
-        bin_width = 50
-        min_rr = np.min(rrs)
-        max_rr = np.max(rrs)
-
-        #Create bins from min to max with 50ms steps
-        bins = np.arange(min_rr, max_rr + bin_width, bin_width)
-        #If not enough bins
-        if len(bins) < 2:
-            return 0.0
-        #Calculate histogram
-        hist, bin_edges = np.histogram(rrs, bins=bins)
-
-        #Deriving components
-        max_bin_index = np.argmax(hist)
-        #Mode(Mo): Most frequent RR interval in seconds, dominant heart rhythm
-        Mo = (bin_edges[max_bin_index] + bin_edges[max_bin_index+1]) / 2 / 1000.0 #Convert to seconds
-
-        #Amplitude of Mode(AMo): Percent of total beats in the bin
-        AMo = (hist[max_bin_index] / len(rrs)) * 100.0
-        #Variational Range(MxDMn): Max RR - Min RR in seconds
-        MxDMn = (max_rr - min_rr) / 1000.0
-        if (MxDMn == 0 or Mo == 0):
-            return 0.0
-        #Calculate Stress Index(si)
-        si = AMo / (2 * Mo * MxDMn)
-
-        return si
-
-    def find_biometric_values(self):
-        """
-        Finding the biometric values that we will use to check if the user is stressed or not
-        
-        Returns:
-            dict -- Contains (alpha, beta, ratio, baevsky, hrv, ibi)
-        """
-        
-        #Finding the biometric values, will use this for baseline AND to find the usual values
-        result = self.compute_hrv()
-
-        if result == None:
-            print("Not enough data for heart rate data...Try again soon.")
-            return None
-        wd, m = result
-        
-        #Getting all of the bandpowers for each value
-        tp9Values = self.process_signal(self.TP9Buffer)
-        tp10Values = self.process_signal(self.TP10Buffer)
-        af7Values = self.process_signal(self.AF7Buffer)
-        af8Values = self.process_signal(self.AF8Buffer)
-
-        if tp9Values == None or tp10Values == None or af7Values == None or af8Values == None:
-            print("The EEG channels do not have enough data and are currently None, try again soon.")
-            return None
-
-        #Combining the values to get an average
-        #{"delta": [0.5, 4], "theta": [4, 8], "alpha": [8, 12], "beta": [12, 30], "total"} 
-        alpha = (tp9Values['alpha'] + tp10Values['alpha'] + af7Values['alpha'] + af8Values['alpha']) / 4.0
-        beta = (tp9Values['beta'] + tp10Values['beta'] + af7Values['beta'] + af8Values['beta']) / 4.0
-        ratio = (tp9Values['ratio'] + tp10Values['ratio'] + af7Values['ratio'] + af8Values['ratio']) / 4.0
-        total = (tp9Values['total'] + tp10Values['total'] + af7Values['total'] + af8Values['total']) / 4.0
-
-        #Saving the average of the bandpowers
-        self.latest_bandpower = {"alpha": alpha, "beta": beta, "ratio": ratio, "total": total}
-
-        baevsky = self.find_baevsky_index(wd)
-
-        bpm = m['bpm']
-        ibi = m['ibi']
-        rmssd = m['rmssd']
-
-        baseline = {"alpha_waves": alpha, 
-                "alpha_waves_relative": alpha / total if total > 0 else -1.0,
-                "beta_waves": beta, 
-                "beta_waves_relative": beta / total if total > 0 else -1.0,
-                "alpha_beta_ratio": ratio, 
-                "baevsky": baevsky, 
-                "bpm": bpm, 
-                "rmssd": rmssd,
-                "ibi": ibi}
-        for key in baseline.keys():
-            baseline[key] = round(baseline[key], 5)
-        return baseline
-
     def find_baseline(self):
         """
         Finding our baseline values using biometrics
@@ -288,30 +154,56 @@ class EEGReceiver:
         #Resetting all values
         self.AF7Buffer = []
         self.AF8Buffer = []
-        self.TP9Buffer = []
-        self.TP10Buffer = []
-        self.AUXBuffer = []
         self.ppg_buffer = []
         self.latest_bandpower = {}
         self.PPG_WINDOW_SIZE = 30 * self.PPG_SAMPLE_RATE
 
         calibration_duration = 30 #We will wait 30 seconds to get a proper baseline
 
-        for i in range(calibration_duration):
+        nasa_engagement_sum = 0.0
+        faa_sum = 0.0
+        for _ in range(calibration_duration):
+            nasa_engagement_sum, faa_sum += self.get_raw_tilt_score(AF7Buffer, AF8Buffer)
             time.sleep(1)
             if i % 2 == 0:
                 print(f"Calibrating... {calibration_duration-i} seconds left.")
 
-        self.baseline_metrics = self.find_biometric_values() 
-        
-        if self.baseline_metrics == None:
-            print("Something went wrong in baseline metrics, please try again.")
-            return None
+        self.baseline_metrics['nasa'] = nasa_engagement_sum / calibration_duration
+        self.baseline_metrics['faa'] = faa_sum / calibration_duration
 
         print("Baseline established.")
         return self.baseline_metrics
 
-    def get_tilt_score(self):
+    def get_raw_tilt_score(self, af7, af8):
+        """
+        Getting the raw tilt score without comparing to baseline, since there likely is no baseline yet
+        Returns:
+            float, float -- NASA engagement index and FAA values
+        """
+        left = self.process_signal(af7)
+        right = self.process_signal(af8)
+
+        alpha = (left['alpha'] + right['alpha']) / 2.0
+        beta = (left['beta'] + right['beta']) / 2.0
+        theta = (left['theta'] + right['theta']) / 2.0
+        total = (left['total'] + right['total']) / 2.0
+        self.latest_bandpower = {"alpha": alpha, "beta": beta, "theta": theta, "total": total}
+
+        if left == None or right == None:
+            return None
+
+        #Finding the NASA Engagement Index using formula Beta / Alpha + Theta
+        L_engagement = (self.left['beta'] + 1e-6) / (self.left['alpha'] + self.left['theta'] + 1e-6)
+        R_engagement = (self.right['beta'] + 1e-6) / (self.right['alpha'] + self.right['theta'] + 1e-6)
+        engagement_index = (L_engagement + R_engagement) / 2.0
+
+        #Finding the Frontal Alpha Symmetry, ln(Right Alpha) - ln(Left Alpha)
+        faa = np.log(self.AF8_metrics['alpha'] + 1e-6) - np.log(self.AF7_metrics['alpha'] + 1e-6)
+
+        return engagement_index, faa
+
+
+    def get_tilt_score(self, compare_to_baseline=True):
         """
         Using the baseline, we would get the tilt score with this method.
 
@@ -319,52 +211,43 @@ class EEGReceiver:
 
         0.0 is zen, monk in the himalayas and 1.0 is full tilt literally punching your monitor
 
-        In the future I could use machine learning to determine this score better, for now thresholds will work. We will be comparing
-        stress in tiers, 25-50%, 50-75%, 75-100% 
+        In the future I could use machine learning to determine this score better, for now thresholds will work.  
         """
-        user_biometrics = self.find_biometric_values()
+        current = self.get_raw_tilt_score(self.AF7Buffer, self.AF8Buffer)
+
+        if current == None:
+            return self.previous_tilt_score
+        nasa, faa = current
+
+        # --- COMPARISON LOGIC ---
+
+        # A. NASA Index: Percentage Increase
+        # If Baseline=1.0, Current=1.5 -> (1.5 - 1.0) / 1.0 = 0.5 (50% increase)
+        # We ignore decreases (boredom), so we use max(0, ...)
+        nasa_change = (nasa - self.baseline_metrics["nasa"]) / self.baseline_metrics["nasa"]
+        workload_stress = max(0.0, nasa_change)
         
-        if user_biometrics == None:
-            print("No user data, cannot compute tilt score.")
-            return -1
-        if self.baseline_metrics == {}:
-            print("Base line is empty, cannot compute tilt score.")
-            return -1
+        # Clamp: Let's say a 100% increase (1.0) is "Max Workload"
+        workload_score = min(workload_stress, 1.0)
+
+        # B. FAA: Absolute Drop
+        # FAA ranges -0.3 to +0.3. A drop means "More Negative/Stressed".
+        # Formula: Baseline - Current
+        # Ex: Baseline (-0.1) - Current (-0.3) = +0.2 drop (Stressed)
+        # Ex: Baseline (-0.1) - Current (0.1) = -0.2 drop (Happier -> Ignore)
+        faa_drop = self.baseline_metrics['faa'] - faa
+        emotion_stress = max(0.0, faa_drop)
         
-        #Checking their alpha/beta ratio against baseline
-        if self.baseline_metrics['alpha_beta_ratio'] == 0:
-            ratio_change = 0.0
-        else:
-            ratio_change = (user_biometrics['alpha_beta_ratio'] - self.baseline_metrics['alpha_beta_ratio']) / self.baseline_metrics['alpha_beta_ratio']
-        ratio_change = max(0.0, min(ratio_change, 1.0)) #Clamping between 0 and 1, might not be the best way
+        # Clamp: A drop of 0.3 log units is massive. Let's make that our "1.0"
+        emotion_score = min(emotion_stress / 0.3, 1.0)
 
-        #Checking baevsky index
-        if self.baseline_metrics['baevsky'] == 0:
-            baevsky_change = 0.0
-        else:
-            baevsky_change = (user_biometrics['baevsky'] - self.baseline_metrics['baevsky']) / self.baseline_metrics['baevsky']
-        baevsky_change = max(0.0, min(baevsky_change, 1.0)) #Clamping between 0 and 1, might not be the best way
+        # --- FINAL WEIGHTED SCORE ---
+        # 40% Workload, 60% Emotion
+        final_tilt = (workload_score * 0.4) + (emotion_score * 0.6)
 
-        #Checking BPM
-        if self.baseline_metrics['bpm'] == 0:
-            bpm_change = 0.0
-        else:
-            bpm_change = (user_biometrics['bpm'] - self.baseline_metrics['bpm']) / self.baseline_metrics['bpm']
-        bpm_change = max(0.0, min(bpm_change, 1.0)) #Clamping between 0 and 1, might not be the best way
-
-        #Checking HRV with RMSSD, higher is better so inverse
-        if self.baseline_metrics['rmssd'] == 0:
-            hrv_change = 0.0
-        else:
-            hrv_change = (self.baseline_metrics['bpm'] - user_biometrics['bpm']) / self.baseline_metrics['bpm']
-        hrv_change = max(0.0, min(hrv_change, 1.0))  
-        #Potentially look into SNS, PNS and other metrics later
-
-        #Combining the values to get a tilt score
-        tilt_score = (ratio_change + baevsky_change + bpm_change + hrv_change) / 4.0
-        tilt_score = max(0.0, min(tilt_score, 1.0)) #Clamping between 0 and 1
-
-        return tilt_score
+        self.previous_tilt_score = final_tilt
+        return final_tilt
+ 
 
     def preprocess_ppg_buffer(self):
         """This method would be to filter and flag the buffers"""
