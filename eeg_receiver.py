@@ -33,7 +33,7 @@ class EEGReceiver:
         self.TP10Buffer = deque(maxlen=self.EEG_WINDOW_SIZE) #RT
         self.ppg_buffer = deque(maxlen=self.PPG_WINDOW_SIZE) 
 
-        self.latest_bandpower = []
+        self.latest_bandpower = {}
 
         #Baseline values
         #WIP - Not sure the exact metrics to look at
@@ -97,13 +97,16 @@ class EEGReceiver:
         """  
         data = list(buffer)
         if len(data) < 512:
+            print("Not enough data in the buffer to process signal.")
             return None
         recent_data = np.array(data[-512:])
         
         delta = round(self.bandpower(recent_data, 256, self.bands['delta'], 2), 2)
 
-        if delta > 1000: #Arbitrary threshold to remove bad data
-            return None
+        if delta > 5000: #Arbitrary threshold to remove bad data
+            print("Delta bandpower too high, likely bad data.")
+            #Just returning the previous data to avoid crash
+            return self.latest_bandpower if self.latest_bandpower != {} else None
         
         theta = round(self.bandpower(recent_data, 256, self.bands['theta'], 2), 2)
         alpha = round(self.bandpower(recent_data, 256, self.bands['alpha'], 2), 2)
@@ -228,14 +231,14 @@ class EEGReceiver:
         Finding the biometric values that we will use to check if the user is stressed or not
         
         Returns:
-            tuple -- Contains (alpha, beta, ratio, baevsky, hrv, ibi)
+            dict -- Contains (alpha, beta, ratio, baevsky, hrv, ibi)
         """
         
         #Finding the biometric values, will use this for baseline AND to find the usual values
         result = self.compute_hrv()
 
         if result == None:
-            print("Not enough data...Try again soon.")
+            print("Not enough data for heart rate data...Try again soon.")
             return None
         wd, m = result
         
@@ -246,6 +249,7 @@ class EEGReceiver:
         af8Values = self.process_signal(self.AF8Buffer)
 
         if tp9Values == None or tp10Values == None or af7Values == None or af8Values == None:
+            print("The EEG channels do not have enough data and are currently None, try again soon.")
             return None
 
         #Combining the values to get an average
@@ -254,6 +258,9 @@ class EEGReceiver:
         beta = (tp9Values['beta'] + tp10Values['beta'] + af7Values['beta'] + af8Values['beta']) / 4.0
         ratio = (tp9Values['ratio'] + tp10Values['ratio'] + af7Values['ratio'] + af8Values['ratio']) / 4.0
         total = (tp9Values['total'] + tp10Values['total'] + af7Values['total'] + af8Values['total']) / 4.0
+
+        #Saving the average of the bandpowers
+        self.latest_bandpower = {"alpha": alpha, "beta": beta, "ratio": ratio, "total": total}
 
         baevsky = self.find_baevsky_index(wd)
 
@@ -285,7 +292,7 @@ class EEGReceiver:
         self.TP10Buffer = []
         self.AUXBuffer = []
         self.ppg_buffer = []
-        self.latest_bandpower = []
+        self.latest_bandpower = {}
         self.PPG_WINDOW_SIZE = 30 * self.PPG_SAMPLE_RATE
 
         calibration_duration = 30 #We will wait 30 seconds to get a proper baseline
@@ -317,8 +324,12 @@ class EEGReceiver:
         """
         user_biometrics = self.find_biometric_values()
         
-        if user_biometrics == None or self.baseline_metrics == {}:
-            print("Not enough data or base line is none, cannot compute tilt score.")
+        if user_biometrics == None:
+            print("No user data, cannot compute tilt score.")
+            return -1
+        if self.baseline_metrics == {}:
+            print("Base line is empty, cannot compute tilt score.")
+            return -1
         
         #Checking their alpha/beta ratio against baseline
         if self.baseline_metrics['alpha_beta_ratio'] == 0:
