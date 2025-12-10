@@ -193,12 +193,12 @@ class EEGReceiver:
             return None
 
         #Finding the NASA Engagement Index using formula Beta / Alpha + Theta
-        L_engagement = (self.left['beta'] + 1e-6) / (self.left['alpha'] + self.left['theta'] + 1e-6)
-        R_engagement = (self.right['beta'] + 1e-6) / (self.right['alpha'] + self.right['theta'] + 1e-6)
+        L_engagement = (left['beta'] + 1e-6) / (left['alpha'] + left['theta'] + 1e-6)
+        R_engagement = (right['beta'] + 1e-6) / (right['alpha'] + right['theta'] + 1e-6)
         engagement_index = (L_engagement + R_engagement) / 2.0
 
         #Finding the Frontal Alpha Symmetry, ln(Right Alpha) - ln(Left Alpha)
-        faa = np.log(self.AF8_metrics['alpha'] + 1e-6) - np.log(self.AF7_metrics['alpha'] + 1e-6)
+        faa = np.log(right['alpha'] + 1e-6) - np.log(left['alpha'] + 1e-6)
 
         return engagement_index, faa
 
