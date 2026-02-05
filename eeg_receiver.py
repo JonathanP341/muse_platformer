@@ -43,7 +43,8 @@ class EEGReceiver:
         self.dispatcher.map("/muse/eeg", self.on_eeg)
         self.dispatcher.map("/muse/ppg", self.on_ppg)
 
-        self.server = BlockingOSCUDPServer((ip, port), self.dispatcher) #Might need to switch this to AsyncIOOSCUDPServer
+        # I can use ThreadingOSCUDPServer instead here if needed
+        self.server = ThreadingOSCUDPServer((ip, port), self.dispatcher)
 
     def start(self):
         """Starting the OSC Server on a background thread"""
