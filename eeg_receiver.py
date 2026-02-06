@@ -2,7 +2,7 @@ import warnings
 warnings.filterwarnings("ignore", category=UserWarning, module='pkg_resources')
 
 from pythonosc.dispatcher import Dispatcher
-from pythonosc.osc_server import BlockingOSCUDPServer
+from pythonosc.osc_server import ThreadingOSCUDPServer
 
 from scipy.signal import welch, periodogram
 from scipy.integrate import simpson
@@ -152,27 +152,56 @@ class EEGReceiver:
         """
         Finding our baseline values using biometrics
         """
-        #Resetting all values
-        self.AF7Buffer = []
-        self.AF8Buffer = []
-        self.ppg_buffer = []
+        print("Clearing buffers for calibration...")
+        # Use clear() to keep the deque properties (maxlen)
+        self.AF7Buffer.clear()
+        self.AF8Buffer.clear()
+        self.ppg_buffer.clear()
         self.latest_bandpower = {}
-        self.PPG_WINDOW_SIZE = 30 * self.PPG_SAMPLE_RATE
+            
+        # Calibration settings
+        calibration_duration = 30 
+            
+        # Wait for buffers to fill up before starting (we need ~2 seconds of data)
+        print("Waiting for data buffers to fill...")
+        while len(self.AF7Buffer) < 512: # Need at least 512 samples for process_signal
+            time.sleep(0.1)
 
-        calibration_duration = 30 #We will wait 30 seconds to get a proper baseline
+        print("Buffers filled. Starting calibration...")
 
         nasa_engagement_sum = 0.0
         faa_sum = 0.0
-        for _ in range(calibration_duration):
-            nasa_engagement_sum, faa_sum += self.get_raw_tilt_score(AF7Buffer, AF8Buffer)
+        valid_samples = 0
+
+        # Change '_' to 'i' so we can use it in the print statement
+        for i in range(calibration_duration):
+            # 1. Get the result
+            result = self.get_raw_tilt_score(self.AF7Buffer, self.AF8Buffer)
+                
+            # 2. Check if valid (process_signal returns None if data is bad/empty)
+            if result is not None:
+                nasa, faa = result
+                    
+                # 3. Add separately (Fixes the SyntaxError)
+                nasa_engagement_sum += nasa
+                faa_sum += faa
+                valid_samples += 1
+                
             time.sleep(1)
+                
             if i % 2 == 0:
-                print(f"Calibrating... {calibration_duration-i} seconds left.")
+                print(f"Calibrating... {calibration_duration - i} seconds left.")
 
-        self.baseline_metrics['nasa'] = nasa_engagement_sum / calibration_duration
-        self.baseline_metrics['faa'] = faa_sum / calibration_duration
+        # Prevent division by zero if something went wrong
+        if valid_samples > 0:
+            self.baseline_metrics['nasa'] = nasa_engagement_sum / valid_samples
+            self.baseline_metrics['faa'] = faa_sum / valid_samples
+        else:
+            print("Warning: Calibration failed (no valid data). Using default baselines.")
+            self.baseline_metrics['nasa'] = 1.0
+            self.baseline_metrics['faa'] = 0.0
 
-        print("Baseline established.")
+        print(f"Baseline established: {self.baseline_metrics}")
         return self.baseline_metrics
 
     def get_raw_tilt_score(self, af7, af8):
