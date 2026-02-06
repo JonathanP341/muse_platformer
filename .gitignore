@@ -1,2 +1,5 @@
 .vscode/
-./__pycache__/
+.__pycache__/
+testing.ipynb
+data.txt
+future_methods.py

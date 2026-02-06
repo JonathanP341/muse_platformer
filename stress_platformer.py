@@ -141,6 +141,8 @@ def main():
     print("Initializing EEG Receiver...")
     eeg = EEGReceiver()
     eeg.start() # Starts the OSC server in a background thread
+    while len(eeg.AF7Buffer) < 1:
+        time.sleep(0.5)
 
     # --- CALIBRATION STATE ---
     # We need to run calibration without freezing the game loop
