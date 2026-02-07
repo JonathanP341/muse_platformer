@@ -5,6 +5,7 @@ from pythonosc.dispatcher import Dispatcher
 from pythonosc.osc_server import BlockingOSCUDPServer
 
 from scipy.signal import welch, periodogram
+from scipy.signal import butter, sosfilt, iirnotch, lfilter
 from scipy.integrate import simpson
 from collections import deque
 
@@ -52,10 +53,7 @@ class EEGReceiver:
     
     def on_eeg(self, address, *values):
         """
-        Processing the EEG data by putting it in the respective buffers
-
-        address -- The address the values are being sent to 
-        values -- Contains an array with 5 values [TP9, AF7, AF8, TP10, AUX], we ignore AUX, TP9 and TP10
+        Processing only the AF7 and AF8 EEG data by putting it in the respective buffers
         """
         raw_values = np.array(values[1:3]) #Ignoring TP9, TP10 and AUX
         eeg_data = np.array(raw_values, dtype=float) 
@@ -71,9 +69,6 @@ class EEGReceiver:
         """
         Processing the PPG data by appending it to its respective buffers, only considering
         PPG1 data as its the most reliable
-        Args:
-            address -- The address the values are being sent to 
-            values -- Contains an array with 3 values [PPG1, PPG2, PPG3], we ignore PPG1/3
         """
         try:
             val = float(values[1])
@@ -81,6 +76,20 @@ class EEGReceiver:
                 self.ppg_buffer.append(val) #Only storing PPG2
         except (ValueError, TypeError):
             pass #Ignore bad values    
+    
+    def filter_signal(self, sig, lowcut=1.0, highcut=50.0, notch_freq=60.0):
+        """
+        Applies the bandpass and notch filters
+        """    
+        #Applying a bandpass filter
+        sos = butter(4, [lowcut, highcut], btype='bandpass', fs=self.EEG_SAMPLE_RATE, output='sos')
+        filtered_sig = sosfilt(sos, sig)
+
+        #Applying a notch filter to remove powerline noise
+        b, a = iirnotch(notch_freq, 30, fs=self.EEG_SAMPLE_RATE)
+        filtered_sig = lfilter(b, a, filtered_sig)
+
+        return filtered_sig
 
     def process_eeg_signal(self, buffer):
         """
@@ -89,11 +98,12 @@ class EEGReceiver:
         This means we will find delta, theta, alpha, and beta and total for the channels 
         of my choice.
         """  
-        data = list(buffer)
+        data = np.array(buffer)
         if len(data) < 512:
             print("Not enough data in the buffer to process signal.")
             return None
-        recent_data = np.array(data[-512:])
+        recent_data = data[-512:]
+        recent_data = self.filter_signal(recent_data)
         
         delta = round(self.bandpower(recent_data, 256, self.bands['delta'], 2), 2)
 
@@ -249,6 +259,7 @@ class EEGReceiver:
 
         #Finding the Frontal Alpha Symmetry, ln(Right Alpha) - ln(Left Alpha)
         faa = np.log(right['alpha'] + 1e-6) - np.log(left['alpha'] + 1e-6)
+        print("Engagement Index: ", engagement_index, " Faa: ", faa)
 
         bpm = self.process_ppg_signal(ppg)
         if bpm is not None:
@@ -301,20 +312,16 @@ if __name__ == '__main__':
     eeg.start()
     while len(eeg.AF7Buffer) < 1:
         time.sleep(0.5)
-    if len(eeg.AF7Buffer) > 1:
-        values = eeg.find_baseline()
-        print(values)
+    print("Filling buffers")
+    time.sleep(2) #Waiting to fill eeg buffers
     tilt = eeg.get_tilt_score()
-    print(f"Length AF7: {len(eeg.AF7Buffer)}, Length AF8: {len(eeg.AF8Buffer)}, Length PPG: {len(eeg.ppg_buffer)}")
     print(f"Tilt Score: {tilt}")
     time.sleep(10) #Waiting another 10 seconds to update data
     tilt = eeg.get_tilt_score()
     print(f"Tilt Score: {tilt}")
-    print(f"Length AF7: {len(eeg.AF7Buffer)}, Length AF8: {len(eeg.AF8Buffer)}, Length PPG: {len(eeg.ppg_buffer)}")
     for i in range(5):
         print("sleeping 5 seconds...")
         time.sleep(5)
         tilt = eeg.get_tilt_score()
         print(f"Tilt Score: {tilt}")
-        print(f"Length AF7: {len(eeg.AF7Buffer)}, Length AF8: {len(eeg.AF8Buffer)}, Length PPG: {len(eeg.ppg_buffer)}")
     print("Done.")
