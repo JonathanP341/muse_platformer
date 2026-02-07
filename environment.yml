@@ -15,3 +15,6 @@ dependencies:
     - seaborn
     - oscpy
     - python-osc
+    - pywin32
+    - tkinter
+    - keyboard

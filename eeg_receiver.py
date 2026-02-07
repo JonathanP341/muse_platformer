@@ -33,8 +33,8 @@ class EEGReceiver:
         self.ppg_buffer = deque(maxlen=self.PPG_WINDOW_SIZE) #PPG2 only
 
         self.latest_bandpower = {}
-        self.latest_bpm = -1
-        self.previous_tilt_score = 0.0
+        self.latest_bpm = None
+        self.previous_tilt_score = -1.0
 
         #Baseline values
         self.baseline_metrics = {"nasa": 0.0, "faa": 0.0, "bpm": 0.0}
@@ -81,6 +81,8 @@ class EEGReceiver:
         """
         Applies the bandpass and notch filters
         """    
+        sig = sig - np.mean(sig)
+
         #Applying a bandpass filter
         sos = butter(4, [lowcut, highcut], btype='bandpass', fs=self.EEG_SAMPLE_RATE, output='sos')
         filtered_sig = sosfilt(sos, sig)
@@ -102,8 +104,9 @@ class EEGReceiver:
         if len(data) < 512:
             print("Not enough data in the buffer to process signal.")
             return None
-        recent_data = data[-512:]
-        recent_data = self.filter_signal(recent_data)
+        
+        clean_data = self.filter_signal(data)
+        recent_data = clean_data[-512:]
         
         delta = round(self.bandpower(recent_data, 256, self.bands['delta'], 2), 2)
 
@@ -259,7 +262,6 @@ class EEGReceiver:
 
         #Finding the Frontal Alpha Symmetry, ln(Right Alpha) - ln(Left Alpha)
         faa = np.log(right['alpha'] + 1e-6) - np.log(left['alpha'] + 1e-6)
-        print("Engagement Index: ", engagement_index, " Faa: ", faa)
 
         bpm = self.process_ppg_signal(ppg)
         if bpm is not None:
@@ -301,6 +303,8 @@ class EEGReceiver:
         else:
             final_tilt = (workload_score * 0.4) + (emotion_score * 0.6)
 
+        if self.previous_tilt_score != -1.0:
+            final_tilt = final_tilt * 0.5 + self.previous_tilt_score * 0.5
         self.previous_tilt_score = final_tilt
         return final_tilt
 
