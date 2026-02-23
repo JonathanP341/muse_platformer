@@ -1,4 +1,4 @@
-name: muse_platformer
+name: muse_overlay
 channels:
   - conda-forge
   - defaults
