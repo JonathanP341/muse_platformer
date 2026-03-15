@@ -315,6 +315,7 @@ if __name__ == '__main__':
     eeg = EEGReceiver()
     eeg.start()
     while len(eeg.AF7Buffer) < 1:
+        print("NOthing yet")
         time.sleep(0.5)
     print("Filling buffers")
     time.sleep(2) #Waiting to fill eeg buffers
